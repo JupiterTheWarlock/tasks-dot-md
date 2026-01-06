@@ -5,6 +5,8 @@
 *.iml
 .idea
 
+Tasks.md/
+
 # npm
 node_modules
 

@@ -1,99 +1,127 @@
-import {App, Editor, MarkdownView, Modal, Notice, Plugin} from 'obsidian';
-import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
+import { Plugin, Notice, TFile, WorkspaceLeaf } from "obsidian";
+import { VIEW_TYPE_BOARD, DEFAULT_SETTINGS, PluginSettings } from "./utils/constants";
+import { BoardView } from "./views/simple-board";
+import { FileService } from "./services/file-service";
+import { DataManager } from "./services/data-manager";
+import { TasksDotMdSettingTab } from "./settings";
 
-// Remember to rename these classes and interfaces!
+// Extend Window interface to include our services
+declare global {
+	interface Window {
+		tasksDotMdFileService?: FileService;
+		tasksDotMdDataManager?: DataManager;
+		tasksDotMdSettings?: PluginSettings;
+	}
+}
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class TasksDotMdPlugin extends Plugin {
+	settings: PluginSettings;
+	fileService: FileService;
+	dataManager: DataManager;
 
 	async onload() {
+		console.log("Loading Tasks.md for Obsidian");
+
+		// Load settings
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
+		// Initialize services
+		this.fileService = new FileService(this.app);
+		this.dataManager = new DataManager(this);
+		await this.dataManager.load();
+
+		// Make services globally available for SolidJS components
+		window.tasksDotMdFileService = this.fileService;
+		window.tasksDotMdDataManager = this.dataManager;
+		window.tasksDotMdSettings = this.settings;
+
+		// Register the board view
+		this.registerView(
+			VIEW_TYPE_BOARD,
+			(leaf) => new BoardView(leaf)
+		);
+
+		// Add ribbon icon to open the board
+		this.addRibbonIcon("layout-list", "Open Tasks.md Board", () => {
+			this.activateBoardView();
 		});
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
-
-		// This adds a simple command that can be triggered anywhere
+		// Add command to open the board
 		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
+			id: "open-tasks-dot-md-board",
+			name: "Open Tasks.md Board",
 			callback: () => {
-				new SampleModal(this.app).open();
-			}
+				this.activateBoardView();
+			},
 		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection('Sample editor command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+		// Add settings tab
+		this.addSettingTab(new TasksDotMdSettingTab(this.app, this));
+
+		// Watch for file changes to refresh the board
+		this.registerEvent(
+			this.app.vault.on("modify", async (file) => {
+				// Only refresh if it's a markdown file in the tasks folder
+				if (file instanceof TFile && file.path.startsWith(this.settings.tasksFolderPath) && file.extension === "md") {
+					// Trigger refresh in open board views
+					this.app.workspace.getLeavesOfType(VIEW_TYPE_BOARD).forEach(leaf => {
+						if (leaf.view instanceof BoardView) {
+							// Force refresh by re-rendering
+							const container = leaf.view.containerEl.children[1];
+							if (container) {
+								container.empty();
+								// The SolidJS app will be re-mounted on next render
+							}
+						}
+					});
 				}
-				return false;
+			})
+		);
+
+		// Create default tasks folder if it doesn't exist
+		const tasksFolder = this.app.vault.getAbstractFileByPath(this.settings.tasksFolderPath);
+		if (!tasksFolder) {
+			try {
+				await this.app.vault.createFolder(this.settings.tasksFolderPath);
+				new Notice(`Created "${this.settings.tasksFolderPath}" folder`);
+			} catch (error) {
+				// Folder might have been created by another process, ignore error
+				console.log("Tasks folder creation skipped (might already exist):", error);
 			}
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-
+		}
 	}
 
-	onunload() {
+	async onunload() {
+		// Clean up global references
+		delete window.tasksDotMdFileService;
+		delete window.tasksDotMdDataManager;
+		delete window.tasksDotMdSettings;
+	}
+
+	async activateBoardView() {
+		const { workspace } = this.app;
+
+		let leaf: WorkspaceLeaf | null | undefined = workspace.getLeavesOfType(VIEW_TYPE_BOARD)[0];
+
+		if (!leaf) {
+			leaf = workspace.getRightLeaf(false);
+			if (leaf) {
+				await leaf.setViewState({ type: VIEW_TYPE_BOARD, active: true });
+			}
+		}
+
+		if (leaf) {
+			workspace.revealLeaf(leaf);
+		}
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<MyPluginSettings>);
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-	}
-}
-
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
-
-	onOpen() {
-		let {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
+		// Update global reference
+		window.tasksDotMdSettings = this.settings;
 	}
 }
